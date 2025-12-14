@@ -1,425 +1,252 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib  # Plus stable que pickle pour sklearn
+import joblib
+import plotly.graph_objects as go
+import plotly.express as px
+import time
+import base64
+import os
 
 # ================================================================
-# CONFIGURATION PAGE
+# 0. FONCTION IMAGE DE FOND (ROBUSTE ET DÉBOGUÉE)
+# ================================================================
+def get_base64_of_bin_file(bin_file):
+    """Lit l'image pour l'encoder en base64 pour le CSS"""
+    # --- DEBUG : Affiche le chemin exact où Python cherche l'image ---
+    print(f"DEBUG: Tentative d'ouverture de l'image au chemin : {bin_file}")
+    # -----------------------------------------------------------------
+    try:
+        with open(bin_file, 'rb') as f:
+            data = f.read()
+        print(f"SUCCÈS: Image trouvée et lue ({len(data)} bytes)")
+        return base64.b64encode(data).decode()
+    except FileNotFoundError:
+        print("ERREUR: Le fichier n'a pas été trouvé à cet emplacement.")
+        return None
+
+# ================================================================
+# 1. CONFIGURATION & STYLE CSS RENFORCÉ
 # ================================================================
 
 st.set_page_config(
-    page_title="Détection de Fraude Bancaire",
+    page_title="BankGuard AI | Détection Fraude",
     page_icon="🛡️",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
+# --- CHARGEMENT IMAGE (Chemin Absolu) ---
+# Trouve le dossier où se trouve ce fichier app.py
+image_path = "background.jpg"
+
+
+# Charge l'image
+img_base64 = get_base64_of_bin_file(image_path)
+
+
+# --- CSS RENFORCÉ ---
+if img_base64:
+    # Utilisation de .stApp::before pour le fond
+    css_bg = f"""
+    <style>
+        /* Force le conteneur principal à être transparent */
+        .stApp {{
+            background-color: transparent !important;
+        }}
+
+        /* Crée la couche de fond floutée */
+        .stApp::before {{
+            content: "";
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            /* Utilisation de l'image encodée */
+            background-image: url("data:image/png;base64,{img_base64}");
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            /* Flou et transparence */
+            filter: blur(10px);
+            opacity: 0.9; 
+            z-index: -1; /* Place le fond derrière tout le reste */
+        }}
+        
+        /* Style des cartes (conteneurs blancs semi-transparents) */
+        div[data-testid="stVerticalBlock"] > div[style*="flex-direction: column;"] > div[data-testid="stVerticalBlock"] {{
+            background-color: rgba(255, 255, 255, 0.90) !important;
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.10);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }}
+    </style>
+    """
+else:
+    # Fallback si l'image n'est pas trouvée
+    css_bg = "<style>.stApp { background-color: #f0f2f6; }</style>"
+    st.toast("⚠️ Image background.png introuvable. Regardez le terminal.", icon="🛑")
+
+# Injection CSS
+st.markdown(css_bg, unsafe_allow_html=True)
+
+# Styles additionnels
+st.markdown("""
+<style>
+    h1, h2, h3 { font-family: 'Segoe UI', sans-serif; color: #1e293b; }
+    .stButton>button {
+        background: linear-gradient(90deg, #2563eb 0%, #1d4ed8 100%);
+        color: white; border: none; padding: 0.6rem 1rem;
+        border-radius: 8px; font-weight: 600; width: 100%;
+        transition: transform 0.2s;
+    }
+    .stButton>button:hover { transform: scale(1.02); box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3); }
+    [data-testid="stSidebar"] { background-color: rgba(15, 23, 42, 0.95) !important; }
+    [data-testid="stSidebar"] * { color: #e2e8f0 !important; }
+</style>
+""", unsafe_allow_html=True)
+
 # ================================================================
-# CHARGEMENT MODÈLE
+# 2. LOGIQUE MÉTIER & CHARGEMENT
 # ================================================================
 
 @st.cache_resource
 def load_model():
-    """Charge le modèle LOF optimisé"""
     try:
-        model = joblib.load("model_lof_optimized.pkl")
-        feature_info = joblib.load("feature_info.pkl")
-        return model, feature_info
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(current_dir, "model_lof_optimized.pkl")
+        feature_path = os.path.join(current_dir, "feature_info.pkl")
+        pipeline = joblib.load(model_path)
+        features = joblib.load(feature_path)
+        return pipeline, features, False
     except FileNotFoundError:
-        st.error("❌ Fichiers modèle introuvables. Exécutez d'abord le notebook d'entraînement.")
-        st.stop()
-    except Exception as e:
-        st.error(f"❌ Erreur lors du chargement: {str(e)}")
-        st.info("💡 Astuce: Vérifiez que scikit-learn est à la même version lors de l'entraînement et du chargement")
-        st.stop()
+        return None, None, True
 
-model, feature_info = load_model()
-
-# ================================================================
-# FONCTIONS UTILITAIRES
-# ================================================================
+pipeline_lof, feature_info, DEMO_MODE = load_model()
 
 def create_features(data):
-    """
-    Crée toutes les features avancées à partir des inputs
-    """
+    """Crée TOUTES les features requises"""
     df = pd.DataFrame([data])
-    
-    # ----- RATIOS -----
+    # Features de base
     df['ratio_to_orig'] = df['amount'] / (df['oldbalanceOrg'] + 1)
     df['ratio_to_dest'] = df['amount'] / (df['oldbalanceDest'] + 1)
-    
-    # ----- ERREURS DE BALANCE -----
     df['error_orig'] = np.abs((df['oldbalanceOrg'] - df['newbalanceOrig']) - df['amount'])
     df['error_dest'] = np.abs((df['newbalanceDest'] - df['oldbalanceDest']) - df['amount'])
     df['error_orig_norm'] = df['error_orig'] / (df['amount'] + 1)
     df['error_dest_norm'] = df['error_dest'] / (df['amount'] + 1)
-    
-    # ----- INDICATEURS -----
     df['orig_emptied'] = int((df['newbalanceOrig'].iloc[0] == 0) and (df['oldbalanceOrg'].iloc[0] > 0))
     df['dest_was_zero'] = int(df['oldbalanceDest'].iloc[0] == 0)
-    df['amount_very_high'] = 0  # Sera comparé à un seuil si nécessaire
-    
-    # ----- TEMPOREL -----
+    # Features mathématiques requises (logs, deltas)
+    df['amount_very_high'] = 0 
+    df['amount_log'] = np.log1p(df['amount'])
+    df['oldbalanceOrg_log'] = np.log1p(df['oldbalanceOrg'])
+    df['oldbalanceDest_log'] = np.log1p(df['oldbalanceDest'])
+    df['delta_orig'] = df['oldbalanceOrg'] - df['newbalanceOrig']
+    df['delta_dest'] = df['newbalanceDest'] - df['oldbalanceDest']
+    # Features temporelles
     df['hour'] = df['step'] % 24
     df['is_night'] = int((df['hour'].iloc[0] >= 22) or (df['hour'].iloc[0] <= 6))
     df['day_of_week'] = (df['step'] // 24) % 7
     df['is_weekend'] = int(df['day_of_week'].iloc[0] >= 5)
-    
-    # ----- LOG -----
-    df['amount_log'] = np.log1p(df['amount'])
-    df['oldbalanceOrg_log'] = np.log1p(df['oldbalanceOrg'])
-    df['oldbalanceDest_log'] = np.log1p(df['oldbalanceDest'])
-    
-    # ----- DELTAS -----
-    df['delta_orig'] = df['oldbalanceOrg'] - df['newbalanceOrig']
-    df['delta_dest'] = df['newbalanceDest'] - df['oldbalanceDest']
-    
     return df
 
-def calculate_balances(type_transaction, amount, old_orig, old_dest):
-    """
-    Calcule automatiquement les nouveaux soldes selon le type de transaction
-    """
-    new_orig = old_orig
-    new_dest = old_dest
-    
-    if type_transaction == "PAYMENT":
-        new_orig = max(0, old_orig - amount)
-        new_dest = old_dest  # Merchants ne changent pas
-    
-    elif type_transaction == "TRANSFER":
-        new_orig = max(0, old_orig - amount)
-        new_dest = old_dest + amount
-    
-    elif type_transaction == "CASH_OUT":
-        new_orig = max(0, old_orig - amount)
-        new_dest = old_dest  # Cash-out n'affecte pas destination
-    
-    elif type_transaction == "DEBIT":
-        new_orig = max(0, old_orig - amount)
-    
-    elif type_transaction == "CASH_IN":
-        new_orig = old_orig + amount
-    
-    return new_orig, new_dest
-
-def get_risk_level(anomaly_score):
-    """Détermine le niveau de risque"""
-    if anomaly_score < -1.5:
-        return "🔴 TRÈS ÉLEVÉ", "danger"
-    elif anomaly_score < -1.0:
-        return "🟠 ÉLEVÉ", "warning"
-    elif anomaly_score < -0.5:
-        return "🟡 MODÉRÉ", "info"
-    else:
-        return "🟢 FAIBLE", "success"
+def calculate_balances(type_txn, amount, old_org, old_dest):
+    new_org, new_dest = old_org, old_dest
+    if type_txn == "PAYMENT": new_org = max(0, old_org - amount)
+    elif type_txn == "TRANSFER": new_org = max(0, old_org - amount); new_dest = old_dest + amount
+    elif type_txn == "CASH_OUT": new_org = max(0, old_org - amount)
+    elif type_txn == "CASH_IN": new_org = old_org + amount
+    elif type_txn == "DEBIT": new_org = max(0, old_org - amount)
+    return new_org, new_dest
 
 # ================================================================
-# INTERFACE UTILISATEUR
+# 3. INTERFACE UTILISATEUR
 # ================================================================
 
-st.title("🛡️ Système de Détection de Fraude Bancaire")
-st.markdown("Application utilisant le modèle **LOF optimisé** avec features avancées")
+with st.sidebar:
+    st.title("🛡️ BankGuard ")
+    st.markdown("---")
+    if DEMO_MODE: st.warning(" Mode Simulation")
+    else: st.success(" Modèle Connecté")
+    auto_calc = st.checkbox("Calcul Solde Auto", value=True)
 
-# Informations sur le modèle
-with st.expander("ℹ️ Informations sur le modèle"):
-    st.markdown("""
-    **Modèle:** Local Outlier Factor (LOF) optimisé
+col_header = st.container()
+with col_header:
+    # Titres avec ombre pour lisibilité sur fond d'image
+    st.markdown("<h1 style='text-shadow: 0 2px 4px rgba(0,0,0,0.3);'>Analyse de Transaction</h1>", unsafe_allow_html=True)
     
-    **Features utilisées:**
-    - Features de base: type, montants, balances
-    - Features avancées: ratios, erreurs de cohérence, indicateurs comportementaux
-    - Features temporelles: heure, jour de semaine
-    
-    **Améliorations:**
-    - ✅ Feature engineering avancé (16 nouvelles features)
-    - ✅ Détection des incohérences de balance
-    - ✅ Identification de comportements suspects
-    - ✅ Contamination calibrée sur données réelles
-    """)
+col_inputs, col_results = st.columns([1, 1.2], gap="large")
 
-st.markdown("---")
+with col_inputs:
+    st.subheader("Transaction")
+    with st.container():
+        c1, c2 = st.columns(2)
+        type_txn = c1.selectbox("Type", ["PAYMENT", "TRANSFER", "CASH_OUT", "DEBIT", "CASH_IN"])
+        amount = c2.number_input("Montant (MAD)", 0.0, value=15000.0, step=100.0)
+        c3, c4 = st.columns(2)
+        day = c3.number_input("Jour", 1, 31, 1)
+        hour = c4.slider("Heure", 0, 23, 14)
 
-# ================================================================
-# SECTION 1 : SAISIE TRANSACTION
-# ================================================================
+    st.subheader("Soldes")
+    with st.container():
+        old_org = st.number_input("Solde Origine (Avant)", 0.0, value=50000.0)
+        old_dest = st.number_input("Solde Dest. (Avant)", 0.0, value=20000.0)
+        if auto_calc:
+            new_org, new_dest = calculate_balances(type_txn, amount, old_org, old_dest)
+            st.caption(f" Nouveaux soldes : Origine {new_org:,.0f} | Dest {new_dest:,.0f}")
+        else:
+            new_org = st.number_input("Nouveau Solde Origine", 0.0, value=old_org)
+            new_dest = st.number_input("Nouveau Solde Dest.", 0.0, value=old_dest)
 
-st.header("📝 Entrer une transaction")
+    st.write("") 
+    analyze_btn = st.button("Lancer l'Analyse ", use_container_width=True)
 
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("Informations de base")
-    
-    type_transaction = st.selectbox(
-        "Type de transaction",
-        ["PAYMENT", "TRANSFER", "CASH_OUT", "DEBIT", "CASH_IN"],
-        help="Type d'opération bancaire"
-    )
-    
-    amount = st.number_input(
-        "Montant (amount)",
-        min_value=0.0,
-        value=10000.0,
-        step=100.0,
-        help="Montant de la transaction"
-    )
-    
-    step = st.number_input(
-        "Step (heure de la transaction)",
-        min_value=1,
-        max_value=743,
-        value=1,
-        help="Étape temporelle (1-743)"
-    )
-
-with col2:
-    st.subheader("Soldes des comptes")
-    
-    oldbalanceOrg = st.number_input(
-        "Ancien solde origine",
-        min_value=0.0,
-        value=50000.0,
-        step=1000.0
-    )
-    
-    oldbalanceDest = st.number_input(
-        "Ancien solde destination",
-        min_value=0.0,
-        value=20000.0,
-        step=1000.0
-    )
-    
-    # Option calcul automatique
-    auto_calculate = st.checkbox(
-        "✨ Calculer automatiquement les nouveaux soldes",
-        value=True,
-        help="Calcule les soldes selon les règles bancaires normales"
-    )
-    
-    if auto_calculate:
-        newbalanceOrig, newbalanceDest = calculate_balances(
-            type_transaction, amount, oldbalanceOrg, oldbalanceDest
-        )
-        
-        st.info(f"**Nouveau solde origine:** {newbalanceOrig:,.2f}")
-        st.info(f"**Nouveau solde destination:** {newbalanceDest:,.2f}")
-    else:
-        newbalanceOrig = st.number_input(
-            "Nouveau solde origine",
-            min_value=0.0,
-            value=oldbalanceOrg - amount if oldbalanceOrg >= amount else 0.0,
-            step=1000.0
-        )
-        
-        newbalanceDest = st.number_input(
-            "Nouveau solde destination",
-            min_value=0.0,
-            value=oldbalanceDest + amount,
-            step=1000.0
-        )
-
-# ================================================================
-# SECTION 2 : PRÉDICTION
-# ================================================================
-
-st.markdown("---")
-
-if st.button("🔍 Analyser la transaction", type="primary", use_container_width=True):
-    
-    # Préparer les données
-    transaction_data = {
-        'step': step,
-        'type': type_transaction,
-        'amount': amount,
-        'oldbalanceOrg': oldbalanceOrg,
-        'newbalanceOrig': newbalanceOrig,
-        'oldbalanceDest': oldbalanceDest,
-        'newbalanceDest': newbalanceDest
+if analyze_btn:
+    step = (day - 1) * 24 + hour
+    txn_data = {
+        'step': step, 'type': type_txn, 'amount': amount,
+        'oldbalanceOrg': old_org, 'newbalanceOrig': new_org,
+        'oldbalanceDest': old_dest, 'newbalanceDest': new_dest
     }
-    
-    # Créer features avancées
-    df_features = create_features(transaction_data)
-    
-    # Extraire dans le bon ordre
-    X_input = df_features[feature_info['all_features']]
-    
-    # Prédiction
-    with st.spinner("Analyse en cours..."):
-        prediction = model.predict(X_input)[0]
-        
-        # Score d'anomalie (LOF)
+    df_feat = create_features(txn_data)
+    score, pred = 0, 1
+    if not DEMO_MODE:
         try:
-            anomaly_score = model.named_steps['model'].score_samples(
-                model.named_steps['pca'].transform(
-                    model.named_steps['preprocess'].transform(X_input)
-                )
-            )[0]
-        except:
-            anomaly_score = -1.0
-    
-    # ================================================================
-    # AFFICHAGE RÉSULTATS
-    # ================================================================
-    
-    st.markdown("---")
-    st.header("📊 Résultats de l'analyse")
-    
-    # Résultat principal
-    col1, col2, col3 = st.columns([2, 2, 1])
-    
-    with col1:
-        if prediction == -1:  # Anomalie détectée
-            st.error("### ⚠️ TRANSACTION SUSPECTE")
-            st.markdown("**Verdict:** Anomalie détectée")
-        else:
-            st.success("### ✅ TRANSACTION NORMALE")
-            st.markdown("**Verdict:** Aucune anomalie détectée")
-    
-    with col2:
-        risk_label, risk_color = get_risk_level(anomaly_score)
-        if risk_color == "danger":
-            st.error(f"### {risk_label}")
-        elif risk_color == "warning":
-            st.warning(f"### {risk_label}")
-        elif risk_color == "info":
-            st.info(f"### {risk_label}")
-        else:
-            st.success(f"### {risk_label}")
-        
-        st.markdown(f"**Score d'anomalie:** {anomaly_score:.3f}")
-    
-    with col3:
-        st.metric(
-            "Confiance",
-            f"{abs(anomaly_score) * 50:.0f}%",
-            help="Niveau de confiance de la prédiction"
-        )
-    
-    # ================================================================
-    # ANALYSE DÉTAILLÉE
-    # ================================================================
-    
-    st.markdown("---")
-    st.subheader("🔬 Analyse détaillée")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("**Données envoyées au modèle**")
-        
-        # Afficher features clés
-        key_features = {
-            'Type': type_transaction,
-            'Montant': f"{amount:,.2f}",
-            'Ratio montant/solde origine': f"{df_features['ratio_to_orig'].iloc[0]:.2%}",
-            'Erreur balance origine': f"{df_features['error_orig_norm'].iloc[0]:.4f}",
-            'Compte origine vidé': "Oui" if df_features['orig_emptied'].iloc[0] else "Non",
-            'Destination initialement vide': "Oui" if df_features['dest_was_zero'].iloc[0] else "Non",
-            'Transaction nocturne': "Oui" if df_features['is_night'].iloc[0] else "Non",
-        }
-        
-        for key, value in key_features.items():
-            st.text(f"{key}: {value}")
-    
-    with col2:
-        st.markdown("**Indicateurs de risque**")
-        
-        # Calculer indicateurs
-        indicators = []
-        
-        # 1. Ratio élevé
-        if df_features['ratio_to_orig'].iloc[0] > 0.8:
-            indicators.append("🔴 Montant très élevé par rapport au solde")
-        
-        # 2. Erreur de balance
-        if df_features['error_orig_norm'].iloc[0] > 0.01:
-            indicators.append("🔴 Incohérence dans les balances")
-        
-        # 3. Compte vidé
-        if df_features['orig_emptied'].iloc[0]:
-            indicators.append("🟠 Compte origine complètement vidé")
-        
-        # 4. Destination vide
-        if df_features['dest_was_zero'].iloc[0] and type_transaction in ['TRANSFER', 'CASH_OUT']:
-            indicators.append("🟡 Destination initialement vide")
-        
-        # 5. Transaction nocturne
-        if df_features['is_night'].iloc[0]:
-            indicators.append("🟡 Transaction effectuée la nuit")
-        
-        if indicators:
-            for indicator in indicators:
-                st.warning(indicator)
-        else:
-            st.success("✅ Aucun indicateur de risque majeur")
-    
-    # ================================================================
-    # RECOMMANDATIONS
-    # ================================================================
-    
-    st.markdown("---")
-    st.subheader("💡 Recommandations")
-    
-    if prediction == -1:
-        st.error("""
-        **Actions recommandées:**
-        
-        1. 🔍 **Vérification manuelle requise**
-        2. 📞 Contacter le client pour confirmer la transaction
-        3. 🚫 Bloquer temporairement le compte si score > -1.5
-        4. 📋 Documenter l'incident dans le système
-        5. 🔐 Renforcer la surveillance du compte
-        """)
+            X_input = df_feat[feature_info['all_features']]
+            if 'preprocess' in pipeline_lof.named_steps:
+                X_trans = pipeline_lof.named_steps['preprocess'].transform(X_input)
+                if 'pca' in pipeline_lof.named_steps: X_trans = pipeline_lof.named_steps['pca'].transform(X_trans)
+                score = pipeline_lof.named_steps['model'].score_samples(X_trans)[0]
+            else: score = pipeline_lof.score_samples(X_input)[0]
+            pred = -1 if score < -1.5 else 1 
+        except Exception as e:
+            st.error(f"Erreur technique : {e}")
+            score, pred = -5, -1
     else:
-        st.success("""
-        **Transaction approuvée**
+        time.sleep(1)
+        pred = -1 if (amount > 50000 and type_txn=="TRANSFER") else 1
+        score = -2.5 if pred == -1 else -0.5
+
+    with col_results:
+        st.subheader("Résultats")
+        if pred == -1:
+            st.markdown(f"""<div style="background-color: #fee2e2; padding: 20px; border-radius: 10px; border-left: 6px solid #ef4444;"><h3 style="color: #b91c1c; margin:0;">🚨 FRAUDE SUSPECTÉE</h3><p>Score : <strong>{score:.2f}</strong></p></div>""", unsafe_allow_html=True)
+            color = "#ef4444"
+        else:
+            st.markdown(f"""<div style="background-color: #dcfce7; padding: 20px; border-radius: 10px; border-left: 6px solid #22c55e;"><h3 style="color: #15803d; margin:0;"> TRANSACTION NORMALE</h3><p>Score : <strong>{score:.2f}</strong></p></div>""", unsafe_allow_html=True)
+            color = "#22c55e"
+
+        fig = go.Figure(go.Indicator(mode = "gauge+number", value = abs(score), title = {'text': "Niveau de Risque"}, gauge = {'axis': {'range': [0, 4]}, 'bar': {'color': color}, 'steps': [{'range': [0, 1.5], 'color': '#f0fdf4'}, {'range': [1.5, 4], 'color': '#fef2f2'}]}))
+        fig.update_layout(height=250, margin=dict(t=40,b=20,l=20,r=20), paper_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True)
         
-        ✅ La transaction peut être traitée normalement
-        """)
-    
-    # ================================================================
-    # DONNÉES COMPLÈTES (EXPANDER)
-    # ================================================================
-    
-    with st.expander("📋 Voir toutes les features calculées"):
-        st.dataframe(df_features.T, use_container_width=True)
+        vals = [min(1, amount/100000), 1 if df_feat['is_night'].iloc[0] else 0.1, min(1, df_feat['error_orig_norm'].iloc[0]*10), min(1, df_feat['ratio_to_orig'].iloc[0])]
+        fig_radar = px.line_polar(r=vals, theta=['Montant', 'Nuit', 'Erreur Balance', 'Ratio'], line_close=True)
+        fig_radar.update_traces(fill='toself', line_color=color)
+        fig_radar.update_layout(height=200, margin=dict(t=20,b=20,l=40,r=40), polar=dict(radialaxis=dict(visible=True, range=[0,1])), showlegend=False)
+        st.plotly_chart(fig_radar, use_container_width=True)
 
-# ================================================================
-# SECTION 3 : STATISTIQUES
-# ================================================================
-
-st.markdown("---")
-st.header("📈 Statistiques du modèle")
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.metric("Recall (amélioré)", "~40-60%", "+20-40%")
-
-with col2:
-    st.metric("Precision (améliorée)", "~30-50%", "+15-30%")
-
-with col3:
-    st.metric("F1-Score (amélioré)", "~35-55%", "+15-35%")
-
-with col4:
-    st.metric("Features utilisées", "20+", "+16")
-
-st.markdown("""
----
-**Note:** Les performances exactes dépendent de votre dataset. 
-Consultez les graphiques générés par le notebook d'entraînement pour les métriques précises.
-""")
-
-# ================================================================
-# FOOTER
-# ================================================================
-
-st.markdown("---")
-st.markdown("""
-<div style='text-align: center; color: gray;'>
-    <p>🛡️ Système de détection de fraude bancaire</p>
-    <p>Modèle: Local Outlier Factor (LOF) optimisé avec features avancées</p>
-</div>
-""", unsafe_allow_html=True)
+elif not analyze_btn:
+    with col_results: st.info(" Entrez les données pour lancer l'analyse.")
