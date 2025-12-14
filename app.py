@@ -150,7 +150,7 @@ col_in, col_out = st.columns([1, 1.2])
 with col_in:
     tx_type = st.selectbox("Type", ["PAYMENT", "TRANSFER", "CASH_OUT", "DEBIT", "CASH_IN"])
     amount = st.number_input("Montant", 0.0, value=15000.0, step=100.0)
-    day = st.number_input("Jour", 1, 31, 1)
+    day = st.number_input("Jour", 1, 7, 1)
     hour = st.slider("Heure", 0, 23, 14)
 
     old_org = st.number_input("Solde origine", 0.0, value=50000.0)
